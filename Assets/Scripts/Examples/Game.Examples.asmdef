@@ -1,3 +1,16 @@
 {
-	"name": "Game.Examples"
+    "name": "Game.Examples",
+    "rootNamespace": "",
+    "references": [
+        "GUID:c53db5da1ecbdbe43a4486c9be622180"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
 }
