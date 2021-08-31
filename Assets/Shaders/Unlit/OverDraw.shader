@@ -2,14 +2,18 @@ Shader "SRPFeature/OverDraw"
 {
     SubShader
     {
-        Tags { "RenderType" = "Transparent" "Queue" = "Transparent" "RenderPipeline" = "SRPDefaultUnlit" }
+        Tags { "RenderType" = "Transparent" "Queue" = "Transparent" }
 
         Pass
         {
-            HLSLPROGRAM
+            Tags { "LightMode" = "SRPDefaultUnlit" }
 
-            #pragma exclude_renderers gles gles3 glcore
-            
+            Blend One One
+
+            HLSLPROGRAM
+            #pragma prefer_hlslcc gles
+            #pragma exclude_renderers d3d11_9x
+
             #pragma vertex VertDefault
             #pragma fragment FragForward
 
@@ -28,20 +32,20 @@ Shader "SRPFeature/OverDraw"
             CBUFFER_START(UnityPerDraw)
             float4x4 unity_ObjectToWorld;
             float4x4 unity_WorldToObject;
-            float4 unity_LODFade;  // x is the fade value ranging within [0,1]. y is x quantized into 16 levels
+            float4 unity_LODFade; // x is the fade value ranging within [0,1]. y is x quantized into 16 levels
             real4 unity_WorldTransformParams; // w is usually 1.0, or -1.0 for odd-negative scale transforms
             CBUFFER_END
-            
+
             float4x4 unity_MatrixVP;
 
-            Varyings VertDefault (Arrtibutes input)
+            Varyings VertDefault(Arrtibutes input)
             {
                 Varyings output;
                 output.positionCS = mul(unity_MatrixVP, mul(unity_ObjectToWorld, float4(input.positionOS.xyz, 1.0)));
                 return output;
             }
 
-            half4 FragForward (Varyings input) : SV_Target
+            half4 FragForward(Varyings input) : SV_Target
             {
                 return half4(0.1, 0.04, 0.02, 0);
             }

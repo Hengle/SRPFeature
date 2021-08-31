@@ -1,6 +1,7 @@
 using UnityEngine;
 using UnityEngine.Rendering;
 using System.Collections.Generic;
+using UnityEngine.Rendering.Universal;
 
 namespace Game.Runtime
 {
@@ -10,18 +11,27 @@ namespace Game.Runtime
         private Material _overDrawMaterial;
 
         private ScriptableCullingParameters _cullingParams;
+        private readonly List<ShaderTagId> _shaderTagIdList;
 
-        private readonly List<ShaderTagId> _shaderTagIdList = new List<ShaderTagId>
-        {
-            new ShaderTagId("SRPDefaultUnlit"),
-            new ShaderTagId("UniversalForward"),
-            new ShaderTagId("UniversalForwardOnly"),
-            new ShaderTagId("LightweightForward")
-        };
+        private ProfilingSampler _clearRenderTargetSampler;
+        private ProfilingSampler _drawOpaqueSampler;
+        private ProfilingSampler _drawSkyboxSampler;
+        private ProfilingSampler _drawTransparentSampler;
 
         public OverDrawRenderPipeline(Shader shader)
         {
             _overDrawShader = shader;
+            _shaderTagIdList = new List<ShaderTagId>()
+            {
+                new ShaderTagId("SRPDefaultUnlit"),
+                new ShaderTagId("UniversalForward"),
+                new ShaderTagId("LightweightForward")
+            };
+
+            _clearRenderTargetSampler = new ProfilingSampler("Clear Render Target");
+            _drawOpaqueSampler = new ProfilingSampler("Render Opaque");
+            _drawSkyboxSampler = new ProfilingSampler("Render Skybox");
+            _drawTransparentSampler = new ProfilingSampler("Render Transparent");
         }
 
         protected override void Render(ScriptableRenderContext context, Camera[] cameras)
@@ -52,6 +62,12 @@ namespace Game.Runtime
             {
                 BeginCameraRendering(context, camera);
 
+                var cameraRenderingSampler = new ProfilingSampler(camera.name);
+                var profilingCMD = CommandBufferPool.Get(cameraRenderingSampler.name);
+                cameraRenderingSampler.Begin(profilingCMD);
+                context.ExecuteCommandBuffer(profilingCMD);
+                profilingCMD.Clear();
+
                 if (!camera.TryGetCullingParameters(false, out _cullingParams))
                 {
                     continue;
@@ -60,53 +76,124 @@ namespace Game.Runtime
                 var cullingResults = context.Cull(ref _cullingParams);
                 context.SetupCameraProperties(camera);
 
-                //camera clear flag
-                var cmd = CommandBufferPool.Get();
-                var clearFlags = camera.clearFlags;
-                var drawSkyBox = clearFlags == CameraClearFlags.Skybox;
-                var clearDepth = clearFlags != CameraClearFlags.Nothing;
-                var clearColor = clearFlags == CameraClearFlags.Color;
-                cmd.ClearRenderTarget(clearDepth, clearColor, camera.backgroundColor);
-                context.ExecuteCommandBuffer(cmd);
-                CommandBufferPool.Release(cmd);
-                
-                // draw opaque
-                var sortingSettings = new SortingSettings(camera) { criteria = SortingCriteria.CommonOpaque };
-                var filteringSettings = new FilteringSettings(RenderQueueRange.opaque, camera.cullingMask);
-                var renderStateBlock = new RenderStateBlock { depthState = new DepthState(true) };
-                var drawingSettings = new DrawingSettings(_shaderTagIdList[0], sortingSettings);
-                for (var i = 1; i < _shaderTagIdList.Count; i++)
+                //render target clear flag
                 {
-                    drawingSettings.SetShaderPassName(i, _shaderTagIdList[i]);
-                }
-                if (camera.cameraType == CameraType.Game)  // only game view
-                {
-                    drawingSettings.overrideMaterial = _overDrawMaterial;
-                }
-                context.DrawRenderers(cullingResults, ref drawingSettings, ref filteringSettings, ref renderStateBlock);
+                    var cmd = CommandBufferPool.Get(_clearRenderTargetSampler.name);
+                    using (new ProfilingScope(cmd, _clearRenderTargetSampler))
+                    {
+                        context.ExecuteCommandBuffer(cmd);
+                        cmd.Clear();
+                        var clearDepth = true;
+                        var clearColor = true;
+#if UNIVERSAL_RENDER_PIPELINE
+                        var additionalCameraData = camera.GetComponent<UniversalAdditionalCameraData>();
+                        if (additionalCameraData.renderType == CameraRenderType.Overlay)
+                        {
+                            clearDepth = additionalCameraData.clearDepth;
+                            clearColor = false;
+                        }
+#else
+                        var clearFlags = camera.clearFlags;
+                        clearDepth = clearFlags != CameraClearFlags.Nothing;
+                        clearColor = clearFlags == CameraClearFlags.Color;
+#endif
+                        cmd.ClearRenderTarget(clearDepth, clearColor, camera.backgroundColor);
+                    }
 
-                if (drawSkyBox)
-                {
-                    context.DrawSkybox(camera);
+                    context.ExecuteCommandBuffer(cmd);
+                    CommandBufferPool.Release(cmd);
                 }
-                
-                // draw transparent
-                sortingSettings = new SortingSettings(camera) { criteria = SortingCriteria.CommonTransparent };
-                filteringSettings = new FilteringSettings(RenderQueueRange.transparent, camera.cullingMask);
-                renderStateBlock = new RenderStateBlock { depthState = new DepthState(false) };
-                drawingSettings = new DrawingSettings(_shaderTagIdList[0], sortingSettings);
-                for (var i = 1; i < _shaderTagIdList.Count; i++)
+
+                // render state
+                var sortingSettings = new SortingSettings(camera);
+                var filteringSettings = new FilteringSettings();
+                var renderStateBlock = new RenderStateBlock();
+                var drawingSettings = new DrawingSettings();
+                filteringSettings.layerMask = camera.cullingMask;
+                filteringSettings.sortingLayerRange = SortingLayerRange.all;
+                for (var i = 0; i < _shaderTagIdList.Count; i++)
                 {
                     drawingSettings.SetShaderPassName(i, _shaderTagIdList[i]);
                 }
-                if (camera.cameraType == CameraType.Game)  // only game view
+
+                if (camera.cameraType == CameraType.Game)
                 {
                     drawingSettings.overrideMaterial = _overDrawMaterial;
                 }
-                context.DrawRenderers(cullingResults, ref drawingSettings, ref filteringSettings, ref renderStateBlock);
-                
+
+                // draw opaque
+                {
+                    var cmd = CommandBufferPool.Get(_drawOpaqueSampler.name);
+                    using (new ProfilingScope(cmd, _drawOpaqueSampler))
+                    {
+                        context.ExecuteCommandBuffer(cmd);
+                        cmd.Clear();
+                        sortingSettings.criteria = SortingCriteria.CommonOpaque;
+                        filteringSettings.renderQueueRange = RenderQueueRange.opaque;
+                        renderStateBlock.mask = RenderStateMask.Depth;
+                        renderStateBlock.depthState = new DepthState(true);
+                        drawingSettings.sortingSettings = sortingSettings;
+                        context.DrawRenderers(cullingResults, ref drawingSettings, ref filteringSettings, ref renderStateBlock);
+                    }
+
+                    context.ExecuteCommandBuffer(cmd);
+                    CommandBufferPool.Release(cmd);
+                }
+
+                // skybox
+                {
+                    var cmd = CommandBufferPool.Get(_drawSkyboxSampler.name);
+                    using (new ProfilingScope(cmd, _drawSkyboxSampler))
+                    {
+                        context.ExecuteCommandBuffer(cmd);
+                        cmd.Clear();
+                        var drawSkyBox = false;
+#if UNIVERSAL_RENDER_PIPELINE
+                        var additionalCameraData = camera.GetComponent<UniversalAdditionalCameraData>();
+                        if (additionalCameraData.renderType == CameraRenderType.Base)
+                        {
+                            drawSkyBox = camera.clearFlags == CameraClearFlags.Skybox;
+                        }
+#else
+                        drawSkyBox = camera.clearFlags == CameraClearFlags.Skybox;
+#endif
+                        if (drawSkyBox)
+                        {
+                            context.DrawSkybox(camera);
+                        }
+                    }
+
+                    context.ExecuteCommandBuffer(cmd);
+                    CommandBufferPool.Release(cmd);
+                }
+
+                // draw transparent
+                {
+                    var cmd = CommandBufferPool.Get(_drawTransparentSampler.name);
+                    using (new ProfilingScope(cmd, _drawTransparentSampler))
+                    {
+                        context.ExecuteCommandBuffer(cmd);
+                        cmd.Clear();
+                        sortingSettings.criteria = SortingCriteria.CommonTransparent;
+                        filteringSettings.renderQueueRange = RenderQueueRange.transparent;
+                        renderStateBlock.mask = RenderStateMask.Depth;
+                        renderStateBlock.depthState = new DepthState(false);
+                        ;
+                        drawingSettings.sortingSettings = sortingSettings;
+                        context.DrawRenderers(cullingResults, ref drawingSettings, ref filteringSettings, ref renderStateBlock);
+                    }
+
+                    context.ExecuteCommandBuffer(cmd);
+                    CommandBufferPool.Release(cmd);
+                }
+
+                cameraRenderingSampler.End(profilingCMD);
+                context.ExecuteCommandBuffer(profilingCMD);
+                CommandBufferPool.Release(profilingCMD);
+
+                // submit
                 context.Submit();
-                
+
                 EndCameraRendering(context, camera);
             }
 
